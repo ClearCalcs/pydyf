@@ -125,7 +125,8 @@ class StreamValidator(Object):
                 self.state = 'page'
             elif str(operator) in clipping_paths:
                 self.state = 'clipping_path'
-            elif str(operator) not in path_construction:
+            # elif str(operator) not in path_construction:
+            elif str(operator) not in [*path_construction, *color, *general_graphics_state]:
                 invalid()
         elif self.state == 'clipping_path':
             if str(operator) in path_painting:
