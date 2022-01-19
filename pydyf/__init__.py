@@ -80,6 +80,67 @@ class Dictionary(Object, dict):
         result.append(b'>>')
         return b'\n'.join(result)
 
+general_graphics_state = ['w', 'J', 'j', 'M', 'd', 'ri', 'i', 'gs']
+special_graphics_state = ['q', 'Q', 'cm']
+path_construction = ['m', 'l', 'c', 'v', 'y', 'h', 're']
+path_painting = ['S', 's', 'f', 'F', 'f*', 'B', 'B*', 'b', 'b*', 'n']
+clipping_paths = ['W', 'W*']
+text_state = ["Tc", "Tw", "Tz", "TL", "Tf", "Tr", "Ts"]
+text_positioning = ["Td", "TD", "Tm", "T*"]
+text_showing = ["TJ", "Tj", "'", "\""]
+color = ["CS", "cs", "SC", "SCN", "sc", "scn", "G", "g", "RG", "rg", "K", "k"]
+shading_patterns  = ['sh']
+marked_content = ["MP", "DP", "BMC", "BDC", "EMC"]
+class StreamValidator(Object):
+    def __init__(self):
+        self.state = 'page'
+        self.depth = 0
+
+    def op(self, operator):
+        operator = operator.decode()
+        print(self.state, operator)
+
+        def invalid():
+            raise Exception(f"Invalid operator {operator} in state {self.state}")
+
+        if self.state == 'page':
+            if str(operator) in ['BT']:
+                self.state = 'text'
+            elif str(operator) in ['m', 're']:
+                self.state = 'path'
+            elif str(operator) in ['BI']:
+                self.state = 'inline'
+            elif str(operator) in ['Do', 'sh']:
+                # Immediate return
+                pass
+            elif str(operator) not in [*general_graphics_state, *special_graphics_state, *color, *text_state, *marked_content]:
+                invalid()
+        elif self.state == 'text':
+            if str(operator) in ['ET']:
+                self.state = 'page'
+            elif str(operator) not in [*general_graphics_state, *color, *text_state, *text_showing, *text_positioning, *marked_content]:
+                invalid()
+        elif self.state == 'path':
+            if str(operator) in path_painting:
+                self.state = 'page'
+            elif str(operator) in clipping_paths:
+                self.state = 'clipping_path'
+            elif str(operator) not in path_construction:
+                invalid()
+        elif self.state == 'clipping_path':
+            if str(operator) in path_painting:
+                self.state = 'page'
+            else:
+                invalid()
+        elif self.state == 'inline':
+            if str(operator) in ['BI']:
+                self.state = 'page'
+            elif str(operator) not in ['ID']:
+                invalid()
+        else:
+            raise Exception(f"Invalid state: {self.state}")
+
+
 
 class Stream(Object):
     """PDF Stream object.
@@ -95,10 +156,13 @@ class Stream(Object):
         self.extra = extra or {}
         #: Compress the stream data if set to ``True``. Default is ``False``.
         self.compress = compress
+        self.validator = StreamValidator()
 
     def begin_text(self):
         """Begin a text object."""
-        self.stream.append(b'BT')
+        op = b'BT'
+        self.validator.op(op)
+        self.stream.append(op)
 
     def clip(self, even_odd=False):
         """Modify current clipping path by intersecting it with current path.
@@ -109,7 +173,9 @@ class Stream(Object):
         Use the even-odd rule if ``even_odd`` set to ``True``.
 
         """
-        self.stream.append(b'W*' if even_odd else b'W')
+        op = b'W*' if even_odd else b'W'
+        self.validator.op(op)
+        self.stream.append(op)
 
     def close(self):
         """Close current subpath.
@@ -118,7 +184,9 @@ class Stream(Object):
         point of the subpath.
 
         """
-        self.stream.append(b'h')
+        op = b'h'
+        self.validator.op(op)
+        self.stream.append(op)
 
     def color_space(self, space, stroke=False):
         """Set the nonstroking color space.
@@ -126,8 +194,10 @@ class Stream(Object):
         If stroke is set to ``True``, set the stroking color space instead.
 
         """
+        op = b'CS' if stroke else b'cs'
+        self.validator.op(op)
         self.stream.append(
-            b'/' + _to_bytes(space) + b' ' + (b'CS' if stroke else b'cs'))
+            b'/' + _to_bytes(space) + b' ' + op)
 
     def curve_to(self, x1, y1, x2, y2, x3, y3):
         """Add cubic Bézier curve to current path.
@@ -136,10 +206,12 @@ class Stream(Object):
         y2)`` as the Bézier control points.
 
         """
+        op = b'c'
+        self.validator.op(op)
         self.stream.append(b' '.join((
             _to_bytes(x1), _to_bytes(y1),
             _to_bytes(x2), _to_bytes(y2),
-            _to_bytes(x3), _to_bytes(y3), b'c')))
+            _to_bytes(x3), _to_bytes(y3), op)))
 
     def curve_start_to(self, x2, y2, x3, y3):
         """Add cubic Bézier curve to current path
@@ -148,9 +220,11 @@ class Stream(Object):
         ``(x2, y2)`` as the Bézier control points.
 
         """
+        op = b'v'
+        self.validator.op(op)
         self.stream.append(b' '.join((
             _to_bytes(x2), _to_bytes(y2),
-            _to_bytes(x3), _to_bytes(y3), b'v')))
+            _to_bytes(x3), _to_bytes(y3), op)))
 
     def curve_end_to(self, x1, y1, x3, y3):
         """Add cubic Bézier curve to current path
@@ -159,21 +233,29 @@ class Stream(Object):
         y3)`` as the Bézier control points.
 
         """
+        op = b'y'
+        self.validator.op(op)
         self.stream.append(b' '.join((
             _to_bytes(x1), _to_bytes(y1),
-            _to_bytes(x3), _to_bytes(y3), b'y')))
+            _to_bytes(x3), _to_bytes(y3), op)))
 
     def draw_x_object(self, reference):
         """Draw object given by reference."""
-        self.stream.append(b'/' + _to_bytes(reference) + b' Do')
+        op = b'Do'
+        self.validator.op(op)
+        self.stream.append(b'/' + _to_bytes(reference) + b' ' + op)
 
     def end(self):
         """End path without filling or stroking."""
-        self.stream.append(b'n')
+        op = b'n'
+        self.validator.op(op)
+        self.stream.append(op)
 
     def end_text(self):
         """End text object."""
-        self.stream.append(b'ET')
+        op = b'ET'
+        self.validator.op(op)
+        self.stream.append(op)
 
     def fill(self, even_odd=False):
         """Fill path using nonzero winding rule.
@@ -181,7 +263,9 @@ class Stream(Object):
         Use even-odd rule if ``even_odd`` is set to ``True``.
 
         """
-        self.stream.append(b'f*' if even_odd else b'f')
+        op = b'f*' if even_odd else b'f'
+        self.validator.op(op)
+        self.stream.append(op)
 
     def fill_and_stroke(self, even_odd=False):
         """Fill and stroke path usign nonzero winding rule.
@@ -189,7 +273,9 @@ class Stream(Object):
         Use even-odd rule if ``even_odd`` is set to ``True``.
 
         """
-        self.stream.append(b'B*' if even_odd else b'B')
+        op = b'B*' if even_odd else b'B'
+        self.validator.op(op)
+        self.stream.append(op)
 
     def fill_stroke_and_close(self, even_odd=False):
         """Fill, stroke and close path using nonzero winding rule.
@@ -197,27 +283,39 @@ class Stream(Object):
         Use even-odd rule if ``even_odd`` is set to ``True``.
 
         """
-        self.stream.append(b'b*' if even_odd else b'b')
+        op = b'b*' if even_odd else b'b'
+        self.validator.op(op)
+        self.stream.append(op)
 
     def line_to(self, x, y):
         """Add line from current point to point ``(x, y)``."""
-        self.stream.append(b' '.join((_to_bytes(x), _to_bytes(y), b'l')))
+        op = b'l'
+        self.validator.op(op)
+        self.stream.append(b' '.join((_to_bytes(x), _to_bytes(y), op)))
 
     def move_to(self, x, y):
         """Begin new subpath by moving current point to ``(x, y)``."""
-        self.stream.append(b' '.join((_to_bytes(x), _to_bytes(y), b'm')))
+        op = b'm'
+        self.validator.op(op)
+        self.stream.append(b' '.join((_to_bytes(x), _to_bytes(y), op)))
 
     def shading(self, name):
         """Paint shape and color shading using shading dictionary ``name``."""
-        self.stream.append(b'/' + _to_bytes(name) + b' sh')
+        op = b'sh'
+        self.validator.op(op)
+        self.stream.append(b'/' + _to_bytes(name) + b' ' + op)
 
     def pop_state(self):
         """Restore graphic state."""
-        self.stream.append(b'Q')
+        op = b'Q'
+        self.validator.op(op)
+        self.stream.append(op)
 
     def push_state(self):
         """Save graphic state."""
-        self.stream.append(b'q')
+        op = b'q'
+        self.validator.op(op)
+        self.stream.append(op)
 
     def rectangle(self, x, y, width, height):
         """Add rectangle to current path as complete subpath.
@@ -226,9 +324,11 @@ class Stream(Object):
         dimensions.
 
         """
+        op = b're'
+        self.validator.op(op)
         self.stream.append(b' '.join((
             _to_bytes(x), _to_bytes(y),
-            _to_bytes(width), _to_bytes(height), b're')))
+            _to_bytes(width), _to_bytes(height), op)))
 
     def set_color_rgb(self, r, g, b, stroke=False):
         """Set RGB color for nonstroking operations.
@@ -237,9 +337,11 @@ class Stream(Object):
         ``True``.
 
         """
+        op = b'RG' if stroke else b'rg'
+        self.validator.op(op)
         self.stream.append(b' '.join((
             _to_bytes(r), _to_bytes(g), _to_bytes(b),
-            (b'RG' if stroke else b'rg'))))
+            op)))
 
     def set_color_special(self, name, stroke=False):
         """Set color for nonstroking operations.
@@ -247,8 +349,10 @@ class Stream(Object):
         Set color for stroking operation if ``stroke`` is set to ``True``.
 
         """
+        op = b'SCN' if stroke else b'scn'
+        self.validator.op(op)
         self.stream.append(
-            b'/' + _to_bytes(name) + b' ' + (b'SCN' if stroke else b'scn'))
+            b'/' + _to_bytes(name) + b' ' + op)
 
     def set_dash(self, dash_array, dash_phase):
         """Set dash line pattern.
@@ -259,33 +363,47 @@ class Stream(Object):
         :type dash_phase: :obj:`int`
 
         """
+        op = b'd'
+        self.validator.op(op)
         self.stream.append(b' '.join((
-            Array(dash_array).data, _to_bytes(dash_phase), b'd')))
+            Array(dash_array).data, _to_bytes(dash_phase), op)))
 
     def set_font_size(self, font, size):
         """Set font name and size."""
+        op = b'Tf'
+        self.validator.op(op)
         self.stream.append(
-            b'/' + _to_bytes(font) + b' ' + _to_bytes(size) + b' Tf')
+            b'/' + _to_bytes(font) + b' ' + _to_bytes(size) + b' ' + op)
 
     def set_text_rendering(self, mode):
         """Set text rendering mode."""
-        self.stream.append(_to_bytes(mode) + b' Tr')
+        op = b'Tr'
+        self.validator.op(op)
+        self.stream.append(_to_bytes(mode) + b' ' + op)
 
     def set_line_cap(self, line_cap):
         """Set line cap style."""
-        self.stream.append(_to_bytes(line_cap) + b' J')
+        op = b'J'
+        self.validator.op(op)
+        self.stream.append(_to_bytes(line_cap) + b' ' + op)
 
     def set_line_join(self, line_join):
         """Set line join style."""
-        self.stream.append(_to_bytes(line_join) + b' j')
+        op = b'j'
+        self.validator.op(op)
+        self.stream.append(_to_bytes(line_join) + b' ' + op)
 
     def set_line_width(self, width):
         """Set line width."""
-        self.stream.append(_to_bytes(width) + b' w')
+        op = b'w'
+        self.validator.op(op)
+        self.stream.append(_to_bytes(width) + b' ' + op)
 
     def set_miter_limit(self, miter_limit):
         """Set miter limit."""
-        self.stream.append(_to_bytes(miter_limit) + b' M')
+        op = b'M'
+        self.validator.op(op)
+        self.stream.append(_to_bytes(miter_limit) + b' ' + op)
 
     def set_state(self, state_name):
         """Set specified parameters in graphic state.
@@ -293,19 +411,27 @@ class Stream(Object):
         :param state_name: Name of the graphic state.
 
         """
-        self.stream.append(b'/' + _to_bytes(state_name) + b' gs')
+        op = b'gs'
+        self.validator.op(op)
+        self.stream.append(b'/' + _to_bytes(state_name) + b' ' + op)
 
     def show_text(self, text):
         """Show text."""
-        self.stream.append(b'[' + _to_bytes(text) + b'] TJ')
+        op = b'TJ'
+        self.validator.op(op)
+        self.stream.append(b'[' + _to_bytes(text) + b'] ' + op)
 
     def stroke(self):
         """Stroke path."""
-        self.stream.append(b'S')
+        op = b'S'
+        self.validator.op(op)
+        self.stream.append(op)
 
     def stroke_and_close(self):
         """Stroke and close path."""
-        self.stream.append(b's')
+        op = b's'
+        self.validator.op(op)
+        self.stream.append(op)
 
     def text_matrix(self, a, b, c, d, e, f):
         """Set text matrix and text line matrix.
@@ -324,9 +450,11 @@ class Stream(Object):
         :type f: :obj:`int` or :obj:`float`
 
         """
+        op = b'Tm'
+        self.validator.op(op)
         self.stream.append(b' '.join((
             _to_bytes(a), _to_bytes(b), _to_bytes(c),
-            _to_bytes(d), _to_bytes(e), _to_bytes(f), b'Tm')))
+            _to_bytes(d), _to_bytes(e), _to_bytes(f), op)))
 
     def transform(self, a, b, c, d, e, f):
         """Modify current transformation matrix.
@@ -345,9 +473,11 @@ class Stream(Object):
         :type f: :obj:`int` or :obj:`float`
 
         """
+        op = b'cm'
+        self.validator.op(op)
         self.stream.append(b' '.join((
             _to_bytes(a), _to_bytes(b), _to_bytes(c),
-            _to_bytes(d), _to_bytes(e), _to_bytes(f), b'cm')))
+            _to_bytes(d), _to_bytes(e), _to_bytes(f), op)))
 
     @property
     def data(self):
